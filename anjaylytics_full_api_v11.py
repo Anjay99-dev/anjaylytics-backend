@@ -1,5 +1,5 @@
 """
-Anjaylytics — Full API (v1.2, model-enabled)
+Anjaylytics — Full API (v1.3, model-enabled)
 - Fixes Plan.cash schema mismatch
 - Keeps yfinance-based live pricing & features
 - Graceful fallbacks when model or data are missing
@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover
 # Config
 # =============================
 APP_NAME = "Anjaylytics API"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 US_WATCH = ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","AVGO","SPY","QQQ"]
 # NOTE: yfinance may not support BSE .BT tickers; these may return no data.
@@ -49,7 +49,7 @@ DEFAULT_SLIP_BPS_US = 10
 DEFAULT_SLIP_BPS_BSE = 60
 DEFAULT_FX_BPS = 50
 
-RISK_THRESHOLDS = {"conservative":0.60, "balanced":0.56, "aggressive":0.53}
+RISK_THRESHOLDS = {"conservative":0.60, "balanced":0.55, "aggressive":0.50}
 MAX_KELLY_CAP = 0.02
 MIN_TICKET_P = 150
 
@@ -165,6 +165,22 @@ _LEXICON = {"beat": +1, "upgrade": +1, "record": +1, "miss": -1, "downgrade": -1
 def _headlines_stub(ticker: str) -> List[str]:
     return [f"{ticker} sentiment placeholder", "Analyst chatter mixed"]
 
+def _headlines(ticker: str) -> List[str]:
+    """Fetch recent news titles via yfinance; fallback to stub if unavailable."""
+    if yf is None:
+        return _headlines_stub(ticker)
+    try:
+        t = yf.Ticker(ticker)
+        news = getattr(t, "news", None) or []
+        titles = []
+        for n in news[:8]:
+            title = n.get("title") if isinstance(n, dict) else None
+            if title:
+                titles.append(title)
+        return titles or _headlines_stub(ticker)
+    except Exception:
+        return _headlines_stub(ticker)
+
 def _sentiment_score(headlines: List[str]) -> float:
     s = 0
     for h in headlines:
@@ -270,8 +286,10 @@ def _build_plan(
     risk: Literal["conservative","balanced","aggressive"],
     fees_bps: float,
     fx_bps: float,
+    min_p_override: Optional[float] = None,
+    min_ev_bps: float = 0.0,
 ) -> Plan:
-    threshold = RISK_THRESHOLDS[risk]
+    threshold = RISK_THRESHOLDS[risk] if min_p_override is None else float(min_p_override)
     symbols, slip_bps, market = (
         (US_WATCH, DEFAULT_SLIP_BPS_US, "US") if preset == "Global" else (BSE_WATCH, DEFAULT_SLIP_BPS_BSE, "BSE")
     )
@@ -294,13 +312,14 @@ def _build_plan(
             rationale_src = "trained model"
             headlines = ["Model-driven probability"]
         else:
-            headlines = _headlines_stub(sym)
+            headlines = _headlines(sym)
             sent = _sentiment_score(headlines)
             p = _heuristic_p(sent)
             rationale_src = f"heuristic sentiment {sent:+.2f}"
 
         ev = _compute_ev(p, up, down, fees_bps, slip_bps, fx_bps if market == "US" else 0.0)
-        if p < threshold or ev <= 0:
+        # Convert EV threshold from bps to decimal for comparison
+        if p < threshold or ev <= (min_ev_bps/10000.0):
             continue
 
         frac = _kelly_fraction(p, up, down)
@@ -366,8 +385,10 @@ async def plan_today(
     preset: Literal["Global","Botswana"] = Query("Global"),
     fees_bps: float = Query(DEFAULT_FEES_BPS),
     fx_bps: float = Query(DEFAULT_FX_BPS),
+    min_p: Optional[float] = Query(None, description="Override the probability threshold (0-1)."),
+    min_ev_bps: float = Query(0.0, description="Require EV >= this many bps (e.g., 0, 25, 50)."),
 ):
-    return _build_plan(preset, daily_budget_pula, bankroll_pula, risk, fees_bps, fx_bps)
+    return _build_plan(preset, daily_budget_pula, bankroll_pula, risk, fees_bps, fx_bps, min_p_override=min_p, min_ev_bps=min_ev_bps)
 
 
 @app.get("/metrics", response_model=Metrics, tags=["Metrics"])
@@ -445,6 +466,8 @@ async def trade_export(
     preset: Literal["Global","Botswana"] = Query("Global"),
     fees_bps: float = Query(DEFAULT_FEES_BPS),
     fx_bps: float = Query(DEFAULT_FX_BPS),
+    min_p: Optional[float] = Query(None, description="Override the probability threshold (0-1)."),
+    min_ev_bps: float = Query(0.0, description="Require EV >= this many bps (e.g., 0, 25, 50)."),
 ):
     plan = _build_plan(preset, daily_budget_pula, bankroll_pula, risk, fees_bps, fx_bps)
     rows = [["date","preset","symbol","name","market","entry","stop","take","probability","ev_pct","size_bwp"]]
