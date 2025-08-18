@@ -80,12 +80,23 @@ class GuideResponse(BaseModel):
     region: Literal["Botswana","Global"]; items: List[GuideItem]; disclaimer: str
 
 # =============================
-# App
+# App & CORS Configuration
 # =============================
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
+
+# Define the specific URLs of your live frontend and local development environment
+origins = [
+    "https://anjaylytics-frontend.vercel.app",
+    "http://localhost:5173", # Default for Vite dev server
+    "http://localhost:3000", # Default for Create React App
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET"],
+    allow_headers=["*"],
 )
 
 # =============================
